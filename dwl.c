@@ -3017,16 +3017,24 @@ tile(Monitor *m)
 		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
 			continue;
 		if (i < m->nmaster) {
-			r = MIN(n, m->nmaster) - i;
-			h = (m->w.height - my - m->gappoh*oe - m->gappih*ie * (r - 1)) / r;
-      resize(c, (struct wlr_box){.x = m->w.x, .y = m->w.y + my, .width = mw,
- 				.height = (m->w.height - my) / (MIN(n, m->nmaster) - i)}, 0, draw_borders);
+      r = MIN(n, m->nmaster) - i;
+      h = (m->w.height - my - m->gappoh*oe - m->gappih*ie * (r - 1)) / r;
+      resize(c, (struct wlr_box){
+        .x = m->w.x + m->gappov*oe,
+        .y = m->w.y + my,
+        .width = mw - m->gappiv*ie,
+        .height = h
+      }, 0, draw_borders);
 			my += c->geom.height + m->gappih*ie;
 		} else {
 			r = n - i;
 			h = (m->w.height - ty - m->gappoh*oe - m->gappih*ie * (r - 1)) / r;
- 			resize(c, (struct wlr_box){.x = m->w.x + mw, .y = m->w.y + ty,
- 				.width = m->w.width - mw, .height = (m->w.height - ty) / (n - i)}, 0, draw_borders);
+ 			resize(c, (struct wlr_box){
+        .x = m->w.x + mw + m->gappov*oe,
+        .y = m->w.y + ty,
+ 				.width = m->w.width - mw - 2*m->gappov*oe,
+        .height = h,
+      }, 0, draw_borders);
 			ty += c->geom.height + m->gappih*ie;
 		}
 		i++;
