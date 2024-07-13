@@ -4,3 +4,10 @@ dwl
 *-protocol.h
 .ccls-cache
 config.h
+
+.devenv*
+devenv.local.nix
+
+.direnv
+
+.pre-commit-config.yaml
