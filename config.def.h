@@ -14,10 +14,14 @@ static const unsigned int gappih           = 10; /* horiz inner gap between wind
 static const unsigned int gappiv           = 10; /* vert inner gap between windows */
 static const unsigned int gappoh           = 10; /* horiz outer gap between windows and screen edge */
 static const unsigned int gappov           = 10; /* vert outer gap between windows and screen edge */
-static const float rootcolor[]             = COLOR(0x222222ff);
-static const float bordercolor[]           = COLOR(0x444444ff);
-static const float focuscolor[]            = COLOR(0x005577ff);
-static const float urgentcolor[]           = COLOR(0xff0000ff);
+static char* rootcolorenv = "COLOR_BACKGROUND";
+static char* bordercolorenv = "COLOR8";
+static char* focuscolorenv = "COLOR15";
+static char* urgentcolorenv = NULL;
+static float rootcolor[4];
+static float bordercolor[4];
+static float focuscolor[4];
+static float urgentcolor[4] = COLOR(0xdd0000ff);
 /* This conforms to the xdg-protocol. Set the alpha to zero to restore the old behavior */
 static const float fullscreen_bg[]         = {0.1f, 0.1f, 0.1f, 1.0f}; /* You can also use glsl colors */
 static const float default_opacity         = 0.75;

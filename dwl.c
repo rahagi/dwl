@@ -390,6 +390,7 @@ static Monitor *xytomon(double x, double y);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
 		Client **pc, LayerSurface **pl, double *nx, double *ny);
 static void zoom(const Arg *arg);
+static void initcolor(void);
 
 /* variables */
 static const char broken[] = "broken";
@@ -3516,11 +3517,20 @@ xwaylandready(struct wl_listener *listener, void *data)
 }
 #endif
 
+void
+initcolor() {
+  if (rootcolorenv != NULL) colorfromenv(rootcolorenv, rootcolor);
+  if (bordercolorenv != NULL) colorfromenv(bordercolorenv, bordercolor);
+  if (focuscolorenv != NULL) colorfromenv(focuscolorenv, focuscolor);
+  if (urgentcolorenv != NULL) colorfromenv(urgentcolorenv, urgentcolor);
+}
+
 int
 main(int argc, char *argv[])
 {
 	char *startup_cmd = NULL;
 	int c;
+  initcolor();
 
 	while ((c = getopt(argc, argv, "s:hdv")) != -1) {
 		if (c == 's')
