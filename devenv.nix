@@ -1,7 +1,4 @@
-{
-  pkgs,
-  ...
-}: {
+{pkgs, ...}: {
   packages = with pkgs; [
     installShellFiles
     pkg-config
@@ -12,7 +9,7 @@
     pixman
     wayland
     wayland-protocols
-    wlroots
+    wlroots_0_17
   ];
 
   languages.nix.enable = true;
