@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 
 #include "util.h"
 
@@ -69,4 +70,19 @@ colorfromenv(char *var, float *rgba)
   rgba[0] *= rgba[3];
   rgba[1] *= rgba[3];
   rgba[2] *= rgba[3];
+}
+
+int
+fd_set_nonblock(int fd) {
+	int flags = fcntl(fd, F_GETFL);
+    if (flags < 0) {
+		perror("fcntl(F_GETFL):");
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+		perror("fcntl(F_SETFL):");
+		return -1;
+    }
+
+	return 0;
 }

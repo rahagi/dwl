@@ -9,7 +9,7 @@
     pixman
     wayland
     wayland-protocols
-    wlroots_0_17
+    wlroots
   ];
 
   languages.nix.enable = true;
