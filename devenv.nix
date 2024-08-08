@@ -10,6 +10,10 @@
     wayland
     wayland-protocols
     wlroots
+
+    xorg.libX11
+    xorg.xcbutilwm
+    xwayland
   ];
 
   languages.nix.enable = true;

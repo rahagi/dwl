@@ -12,7 +12,7 @@ DWLDEVCFLAGS = -g -pedantic -Wall -Wextra -Wdeclaration-after-statement \
 	-Wfloat-conversion
 
 # CFLAGS / LDFLAGS
-PKGS      = wlroots-0.18 wayland-server xkbcommon libinput $(XLIBS)
+PKGS      = wlroots-0.18 wayland-server xkbcommon libinput pixman-1 $(XLIBS)
 DWLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(DWLCPPFLAGS) $(DWLDEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` -lm $(LIBS)
 
@@ -21,7 +21,8 @@ dwl: dwl.o util.o dwl-ipc-unstable-v2-protocol.o
 	$(CC) dwl.o util.o dwl-ipc-unstable-v2-protocol.o $(LDLIBS) $(LDFLAGS) $(DWLCFLAGS) -o $@
 dwl.o: dwl.c config.mk config.h client.h cursor-shape-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
-	xdg-shell-protocol.h wlr-output-power-management-unstable-v1-protocol.h dwl-ipc-unstable-v2-protocol.h
+	xdg-shell-protocol.h wlr-output-power-management-unstable-v1-protocol.h dwl-ipc-unstable-v2-protocol.h \
+	tearing-control-v1-protocol.h
 util.o: util.c util.h
 dwl-ipc-unstable-v2-protocol.o: dwl-ipc-unstable-v2-protocol.c dwl-ipc-unstable-v2-protocol.h
 
@@ -52,6 +53,9 @@ dwl-ipc-unstable-v2-protocol.h:
 dwl-ipc-unstable-v2-protocol.c:
 	$(WAYLAND_SCANNER) private-code \
 		protocols/dwl-ipc-unstable-v2.xml $@
+tearing-control-v1-protocol.h:
+	$(WAYLAND_SCANNER) server-header \
+		$(WAYLAND_PROTOCOLS)/staging/tearing-control/tearing-control-v1.xml $@
 
 config.h:
 	cp config.def.h $@
