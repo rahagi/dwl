@@ -1,6 +1,8 @@
 /*
  * See LICENSE file for copyright and license details.
  */
+#include <wlr/util/log.h>
+
 #include <getopt.h>
 #include <libinput.h>
 #include <linux/input-event-codes.h>
@@ -528,7 +530,8 @@ applyrules(Client *c)
       }
     }
   }
-  wlr_scene_node_for_each_buffer(&c->scene_surface->node, scenebuffersetopacity, c);
+  if (c->scene_surface)
+    wlr_scene_node_for_each_buffer(&c->scene_surface->node, scenebuffersetopacity, c);
   setmon(c, mon, newtags);
 }
 
@@ -1565,7 +1568,8 @@ dwl_ipc_output_set_client_tags(struct wl_client *client, struct wl_resource *res
     return;
 
   selected_client->tags = newtags;
-  focusclient(focustop(selmon), 1);
+  if (selmon == monitor)
+    focusclient(focustop(monitor), 1);
   arrange(selmon);
   printstatus();
 }
@@ -1609,7 +1613,8 @@ dwl_ipc_output_set_tags(struct wl_client *client, struct wl_resource *resource, 
     monitor->seltags ^= 1;
 
   monitor->tagset[monitor->seltags] = newtags;
-  focusclient(focustop(monitor), 1);
+  if (selmon == monitor)
+    focusclient(focustop(monitor), 1);
   arrange(monitor);
   printstatus();
 }
@@ -3016,6 +3021,8 @@ setup(void)
   output_mgr = wlr_output_manager_v1_create(dpy);
   LISTEN_STATIC(&output_mgr->events.apply, outputmgrapply);
   LISTEN_STATIC(&output_mgr->events.test, outputmgrtest);
+
+  wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, dwl_ipc_manager_bind);
 
   /* Make sure XWayland clients don't connect to the parent X server,
    * e.g when running in the x11 backend or the wayland backend and the
