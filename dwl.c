@@ -50,6 +50,7 @@
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_single_pixel_buffer_v1.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
@@ -89,6 +90,11 @@ enum { LyrBg, LyrBottom, LyrTile, LyrFloat, LyrTop, LyrFS, LyrOverlay, LyrBlock,
 enum { NetWMWindowTypeDialog, NetWMWindowTypeSplash, NetWMWindowTypeToolbar,
   NetWMWindowTypeUtility, NetLast }; /* EWMH atoms */
 #endif
+
+typedef struct ForceTearingRule {
+  const char* title;
+  const char* appid;
+} ForceTearingRule;
 
 typedef union {
   int i;
@@ -143,6 +149,7 @@ typedef struct {
   int isfloating, isurgent, isfullscreen;
   float opacity;
   uint32_t resize; /* configure serial of a pending resize */
+  enum wp_tearing_control_v1_presentation_hint tearing_hint;
 } Client;
 
 typedef struct {
@@ -257,6 +264,19 @@ typedef struct {
   struct wl_listener destroy;
 } SessionLock;
 
+typedef struct TearingController {
+  struct wlr_tearing_control_v1 *tearing_control;
+  struct wl_listener set_hint;
+  struct wl_listener destroy;
+
+  struct wl_list link; /* tearing_controllers */
+} TearingController;
+
+typedef struct SendFrameDoneData {
+  struct timespec when;
+  struct Monitor *mon;
+} SendFrameDoneData;
+
 /* function declarations */
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applyrules(Client *c);
@@ -271,6 +291,7 @@ static void chvt(const Arg *arg);
 static void checkidleinhibitor(struct wlr_surface *exclude);
 static void cleanup(void);
 static void cleanupmon(struct wl_listener *listener, void *data);
+static bool clientcantear(Client* c);
 static void closemon(Monitor *m);
 static void commitlayersurfacenotify(struct wl_listener *listener, void *data);
 static void commitnotify(struct wl_listener *listener, void *data);
@@ -320,6 +341,9 @@ static Client *focustop(Monitor *m);
 static void fullscreennotify(struct wl_listener *listener, void *data);
 static void gpureset(struct wl_listener *listener, void *data);
 static void handlesig(int signo);
+static void handletearingcontrollersethint(struct wl_listener *listener, void *data);
+static void handletearingcontrollerdestroy(struct wl_listener *listener, void *data);
+static void handlenewtearinghint(struct wl_listener *listener, void *data);
 static void incnmaster(const Arg *arg);
 static void incgaps(const Arg *arg);
 static void incigaps(const Arg *arg);
@@ -343,6 +367,7 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
     double sy, double sx_unaccel, double sy_unaccel);
 static void motionrelative(struct wl_listener *listener, void *data);
 static void moveresize(const Arg *arg);
+static bool outputcantear(Monitor* m);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
 static void outputmgrtest(struct wl_listener *listener, void *data);
@@ -357,6 +382,7 @@ static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact, int draw_borders);
 static void run(char *startup_cmd);
+static void sendframedoneiterator(struct wlr_scene_buffer *buffer, int x, int y, void *user_data);
 static void scenebuffersetopacity(struct wlr_scene_buffer *buffer, int sx, int sy, void *user_data);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
@@ -442,6 +468,10 @@ static struct wlr_session_lock_manager_v1 *session_lock_mgr;
 static struct wlr_scene_rect *locked_bg;
 static struct wlr_session_lock_v1 *cur_lock;
 static struct wl_listener lock_listener = {.notify = locksession};
+
+struct wlr_tearing_control_manager_v1 *tearing_control_v1;
+struct wl_listener tearing_control_new_object;
+struct wl_list tearing_controllers;
 
 static struct wlr_seat *seat;
 static KeyboardGroup *kb_group;
@@ -808,6 +838,35 @@ cleanupmon(struct wl_listener *listener, void *data)
   free(m);
 }
 
+bool
+clientcantear(Client* c)
+{
+  bool res = false;
+  const char* appid = client_get_appid(c);
+  const char* title = client_get_title(c);
+
+  switch (c->tearing_hint) {
+    case WP_TEARING_CONTROL_V1_PRESENTATION_HINT_VSYNC:
+      res = false;
+      break;
+
+    case WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC:
+      return true;
+  };
+
+  for (unsigned i = 0; i < LENGTH(force_tearing); i++) {
+    if (appid)
+      if (strcmp(force_tearing[i].appid, appid) == 0)
+        return true;
+
+    if (title)
+      if (strcmp(force_tearing[i].title, title) == 0)
+        return true;
+  }
+
+  return res;
+}
+
 void
 closemon(Monitor *m)
 {
@@ -898,7 +957,7 @@ commitnotify(struct wl_listener *listener, void *data)
   }
 
   if (client_surface(c)->mapped && c->mon)
-    resize(c, c->geom, (c->isfloating && !c->isfullscreen));
+    resize(c, c->geom, (c->isfloating && !c->isfullscreen), (c->isfloating && !c->isfullscreen));
 
   if (c->scene_surface)
     wlr_scene_node_for_each_buffer(&c->scene_surface->node, scenebuffersetopacity, c);
@@ -1263,6 +1322,12 @@ cursorwarptohint(void)
     wlr_cursor_warp(cursor, NULL, sx + c->geom.x + c->bw, sy + c->geom.y + c->bw);
     wlr_seat_pointer_warp(active_constraint->seat, sx, sy);
   }
+}
+
+void
+defaultgaps(const Arg *arg)
+{
+  setgaps(gappoh, gappov, gappih, gappiv);
 }
 
 void
@@ -1807,6 +1872,61 @@ handlesig(int signo)
 }
 
 void
+handletearingcontrollersethint(struct wl_listener *listener, void *data)
+{
+  Client *c = NULL, *i = NULL;
+  struct TearingController *controller = wl_container_of(listener, controller, set_hint);
+
+  struct wlr_xdg_surface *surface = wlr_xdg_surface_try_from_wlr_surface(controller->tearing_control->surface);
+
+  /* FIXME: broken appearantly */
+  wl_list_for_each(i, &fstack, flink) {
+    if (VISIBLEON(i, selmon))
+      if (i->surface.xdg == surface) {
+        c = i;
+        break;
+      }
+  }
+
+  if (c) {
+    fprintf(stderr, "FOUND\n");
+    c->tearing_hint = controller->tearing_control->current;
+  }
+}
+
+void
+handletearingcontrollerdestroy(struct wl_listener *listener, void *data)
+{
+  struct TearingController *controller = wl_container_of(listener, controller, destroy);
+  wl_list_remove(&controller->link);
+  free(controller);
+}
+
+void
+handlenewtearinghint(struct wl_listener *listener, void *data)
+{
+  struct wlr_tearing_control_v1 *tearing_control = data;
+  enum wp_tearing_control_v1_presentation_hint hint = wlr_tearing_control_manager_v1_surface_hint_from_surface(tearing_control_v1, tearing_control->surface);
+  struct TearingController *controller = calloc(1, sizeof(struct TearingController));
+
+  fprintf(stderr, "New presentation hint %d received for surface %p\n\n", hint, (void*)tearing_control->surface);
+
+  if (!controller) {
+    fprintf(stderr, "!controller\n");
+    return;
+  }
+
+  controller->tearing_control = tearing_control;
+  controller->set_hint.notify = handletearingcontrollersethint;
+  wl_signal_add(&tearing_control->events.set_hint, &controller->set_hint);
+  controller->destroy.notify = handletearingcontrollerdestroy;
+  wl_signal_add(&tearing_control->events.destroy, &controller->destroy);
+  wl_list_init(&controller->link);
+
+  wl_list_insert(&tearing_controllers, &controller->link);
+}
+
+void
 incnmaster(const Arg *arg)
 {
   if (!arg || !selmon)
@@ -2054,8 +2174,7 @@ void
 mapnotify(struct wl_listener *listener, void *data)
 {
   /* Called when the surface is mapped, or ready to display on-screen. */
-  Client *p = NULL;
-  Client *w, *c = wl_container_of(listener, c, map);
+  Client *p, *w, *c = wl_container_of(listener, c, map);
   Monitor *m;
   int i;
 
@@ -2111,7 +2230,7 @@ mapnotify(struct wl_listener *listener, void *data)
 unset_fullscreen:
   m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
   wl_list_for_each(w, &clients, link) {
-    if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
+    if (w != c && w->isfullscreen && m == w->mon && (w->tags & c->tags))
       setfullscreen(w, 0);
   }
 }
@@ -2240,11 +2359,11 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
   if (cursor_mode == CurMove) {
     /* Move the grabbed client to the new position. */
     resize(grabc, (struct wlr_box){.x = (int)round(cursor->x) - grabcx, .y = (int)round(cursor->y) - grabcy,
-      .width = grabc->geom.width, .height = grabc->geom.height}, 1);
+      .width = grabc->geom.width, .height = grabc->geom.height}, 1, 1);
     return;
   } else if (cursor_mode == CurResize) {
     resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
-      .width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
+      .width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1, 1);
     return;
   }
 
@@ -2298,6 +2417,16 @@ moveresize(const Arg *arg)
     wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
     break;
   }
+}
+
+bool
+outputcantear(Monitor* m)
+{
+  Client *c = focustop(m);
+  if (c && c->isfullscreen && clientcantear(c))
+    return true;
+
+  return false;
 }
 
 void
@@ -2443,16 +2572,23 @@ rendermon(struct wl_listener *listener, void *data)
   /* This function is called every time an output is ready to display a frame,
    * generally at the output's refresh rate (e.g. 60Hz). */
   Monitor *m = wl_container_of(listener, m, frame);
-  Client *c;
   struct wlr_output_state pending = {0};
-  struct wlr_gamma_control_v1 *gamma_control;
-  struct timespec now;
+  struct wlr_scene_output *scene_output = m->scene_output;
+  struct wlr_output *wlr_output = m->wlr_output;
+  struct wlr_gamma_control_v1 *gamma_control = NULL;
+  SendFrameDoneData frame_done_data = {0};
 
-  /* Render if no XDG clients have an outstanding resize and are visible on
-   * this monitor. */
-  wl_list_for_each(c, &clients, link) {
-    if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m) && !client_is_stopped(c))
-      goto skip;
+  m->wlr_output->frame_pending = false;
+
+  if (!wlr_output->needs_frame && !m->gamma_lut_changed &&
+      !pixman_region32_not_empty(&scene_output->pending_commit_damage)) {
+    goto skip;
+  }
+
+  wlr_output_state_init(&pending);
+  if (!wlr_scene_output_build_state(m->scene_output, &pending, NULL)) {
+    wlr_output_state_finish(&pending);
+    goto skip;
   }
 
   /*
@@ -2464,29 +2600,41 @@ rendermon(struct wl_listener *listener, void *data)
    * the gamma can not be committed).
    */
   if (m->gamma_lut_changed) {
-    gamma_control
-        = wlr_gamma_control_manager_v1_get_control(gamma_control_mgr, m->wlr_output);
+    // gamma_control
+    //     = wlr_gamma_control_manager_v1_get_control(gamma_control_mgr, m->wlr_output);
     m->gamma_lut_changed = 0;
-
-    if (!wlr_gamma_control_v1_apply(gamma_control, &pending))
-      goto commit;
+    gamma_control = wlr_gamma_control_manager_v1_get_control(
+        gamma_control_mgr, m->wlr_output);
+    if (!wlr_gamma_control_v1_apply(gamma_control, &pending)) {
+      wlr_output_state_finish(&pending);
+      goto skip;
+    }
 
     if (!wlr_output_test_state(m->wlr_output, &pending)) {
       wlr_gamma_control_v1_send_failed_and_destroy(gamma_control);
-      goto commit;
+      wlr_output_state_set_gamma_lut(&pending, 0, NULL, NULL, NULL);
     }
-    wlr_output_commit_state(m->wlr_output, &pending);
-    wlr_output_schedule_frame(m->wlr_output);
-  } else {
-commit:
-    wlr_scene_output_commit(m->scene_output, NULL);
+  }
+  if (outputcantear(m)) {
+    pending.tearing_page_flip = true;
+
+    if (!wlr_output_test_state(m->wlr_output, &pending)) {
+      fprintf(stderr, "Output test failed on '%s', retrying without tearing page-flip\n", m->wlr_output->name);
+
+      pending.tearing_page_flip = false;
+    }
   }
 
-skip:
-  /* Let clients know a frame has been rendered */
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  wlr_scene_output_send_frame_done(m->scene_output, &now);
+  if (!wlr_output_commit_state(m->wlr_output, &pending))
+    fprintf(stderr, "Page-flip failed on output %s", m->wlr_output->name);
+
   wlr_output_state_finish(&pending);
+
+ skip:
+  /* Send frame done to all visible surfaces */
+  clock_gettime(CLOCK_MONOTONIC, &frame_done_data.when);
+  frame_done_data.mon = m;
+  wlr_scene_output_for_each_buffer(m->scene_output, sendframedoneiterator, &frame_done_data);
 }
 
 void
@@ -2618,6 +2766,16 @@ scenebuffersetopacity(struct wlr_scene_buffer *buffer, int sx, int sy, void *dat
   /* xdg-popups are children of Client.scene, we do not have to worry about
      messing with them. */
   wlr_scene_buffer_set_opacity(buffer, c->isfullscreen ? 1 : c->opacity);
+}
+
+void
+sendframedoneiterator(struct wlr_scene_buffer *buffer, int x, int y, void *user_data)
+{
+  SendFrameDoneData *data = user_data;
+  if (buffer->primary_output != data->mon->scene_output)
+    return;
+
+  wlr_scene_buffer_send_frame_done(buffer, &data->when);
 }
 
 void
@@ -3011,8 +3169,10 @@ setup(void)
   LISTEN_STATIC(&output_mgr->events.apply, outputmgrapply);
   LISTEN_STATIC(&output_mgr->events.test, outputmgrtest);
 
-  wlr_scene_set_presentation(scene, wlr_presentation_create(dpy, backend));
-  wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, dwl_ipc_manager_bind);
+  tearing_control_v1 = wlr_tearing_control_manager_v1_create(dpy, 1);
+  tearing_control_new_object.notify = handlenewtearinghint;
+  wl_signal_add(&tearing_control_v1->events.new_object, &tearing_control_new_object);
+  wl_list_init(&tearing_controllers);
 
   /* Make sure XWayland clients don't connect to the parent X server,
    * e.g when running in the x11 backend or the wayland backend and the
@@ -3099,7 +3259,7 @@ tile(Monitor *m)
     draw_borders = 0;
 
   if (n > m->nmaster)
-    mw = m->nmaster ? ROUND((m->w.width + m->gappiv*ie) * m->mfact) : 0;
+    mw = m->nmaster ? (int)roundf((m->w.width + m->gappiv*ie) * m->mfact) : 0;
   else
     mw = m->w.width - 2*m->gappov*oe + m->gappiv*ie;
   i = 0;
