@@ -957,8 +957,12 @@ commitnotify(struct wl_listener *listener, void *data)
     return;
   }
 
-  if (client_surface(c)->mapped && c->mon)
-    resize(c, c->geom, (c->isfloating && !c->isfullscreen), (c->isfloating && !c->isfullscreen));
+  if (client_surface(c)->mapped && c->mon) {
+    if (c->mon->lt[c->mon->sellt]->arrange && !c->isfullscreen && !c->isfloating)
+      c->mon->lt[c->mon->sellt]->arrange(c->mon);
+    else
+      resize(c, c->geom, (c->isfloating && !c->isfullscreen), (c->isfloating && !c->isfullscreen));
+  }
 
   if (c->scene_surface)
     wlr_scene_node_for_each_buffer(&c->scene_surface->node, scenebuffersetopacity, c);
@@ -1215,6 +1219,7 @@ createnotify(struct wl_listener *listener, void *data)
   c = toplevel->base->data = ecalloc(1, sizeof(*c));
   c->surface.xdg = toplevel->base;
   c->bw = borderpx;
+  c->opacity = default_opacity;
 
   LISTEN(&toplevel->base->surface->events.commit, &c->commit, commitnotify);
   LISTEN(&toplevel->base->surface->events.map, &c->map, mapnotify);
@@ -2676,6 +2681,7 @@ resize(Client *c, struct wlr_box geo, int interact, int draw_borders)
 
   client_set_bounds(c, geo.width, geo.height);
   c->geom = geo;
+  c->bw = draw_borders ? borderpx : 0;
   applybounds(c, bbox);
 
   /* Update scene-graph, including borders */
