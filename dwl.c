@@ -356,6 +356,7 @@ static void motionnotify(uint32_t time, struct wlr_input_device *device, double 
     double sy, double sx_unaccel, double sy_unaccel);
 static void motionrelative(struct wl_listener *listener, void *data);
 static void moveresize(const Arg *arg);
+static int moncantear(Monitor* m);
 static bool outputcantear(Monitor* m);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
@@ -1862,18 +1863,27 @@ handletearingcontrollersethint(struct wl_listener *listener, void *data)
   struct TearingController *controller = wl_container_of(listener, controller, set_hint);
 
   struct wlr_xdg_surface *surface = wlr_xdg_surface_try_from_wlr_surface(controller->tearing_control->surface);
+#ifdef XWAYLAND
+  struct wlr_xwayland_surface *xsurface = wlr_xwayland_surface_try_from_wlr_surface(controller->tearing_control->surface);
+#endif
 
-  /* FIXME: broken appearantly */
   wl_list_for_each(i, &fstack, flink) {
-    if (VISIBLEON(i, selmon))
-      if (i->surface.xdg == surface) {
-        c = i;
-        break;
-      }
+    if (i->surface.xdg == surface
+#ifdef XWAYLAND
+        || i->surface.xwayland == xsurface
+#endif
+    ) {
+      c = i;
+      break;
+    }
   }
 
   if (c) {
-    fprintf(stderr, "FOUND\n");
+    enum wp_tearing_control_v1_presentation_hint hint = controller->tearing_control->current;
+    fprintf(
+      stderr, "TEARING: found surface: %p(appid: '%s', title: '%s'), hint: %d(%s)\n",
+      (void*)c, client_get_appid(c), client_get_title(c), hint, hint ? "ASYNC" : "VSYNC"
+    );
     c->tearing_hint = controller->tearing_control->current;
   }
 }
@@ -1882,6 +1892,9 @@ void
 handletearingcontrollerdestroy(struct wl_listener *listener, void *data)
 {
   struct TearingController *controller = wl_container_of(listener, controller, destroy);
+
+  wl_list_remove(&controller->set_hint.link);
+  wl_list_remove(&controller->destroy.link);
   wl_list_remove(&controller->link);
   free(controller);
 }
@@ -1890,24 +1903,47 @@ void
 handlenewtearinghint(struct wl_listener *listener, void *data)
 {
   struct wlr_tearing_control_v1 *tearing_control = data;
-  enum wp_tearing_control_v1_presentation_hint hint = wlr_tearing_control_manager_v1_surface_hint_from_surface(tearing_control_v1, tearing_control->surface);
   struct TearingController *controller = calloc(1, sizeof(struct TearingController));
 
-  fprintf(stderr, "New presentation hint %d received for surface %p\n\n", hint, (void*)tearing_control->surface);
-
-  if (!controller) {
-    fprintf(stderr, "!controller\n");
+  if (!controller)
     return;
-  }
 
   controller->tearing_control = tearing_control;
   controller->set_hint.notify = handletearingcontrollersethint;
   wl_signal_add(&tearing_control->events.set_hint, &controller->set_hint);
+
   controller->destroy.notify = handletearingcontrollerdestroy;
   wl_signal_add(&tearing_control->events.destroy, &controller->destroy);
-  wl_list_init(&controller->link);
 
+  wl_list_init(&controller->link);
   wl_list_insert(&tearing_controllers, &controller->link);
+}
+
+static inline void
+forcetearingrule(Client *c)
+{
+  int success = 0;
+  const char* appid = client_get_appid(c);
+  const char* title = client_get_title(c);
+
+  for (unsigned i = 0; i < LENGTH(force_tearing); i++) {
+    if (appid)
+      if (strcmp(force_tearing[i].appid, appid) == 0) {
+        success = 1;
+        break;
+      }
+
+    if (title)
+      if (strcmp(force_tearing[i].title, title) == 0) {
+        success = 1;
+        break;
+      }
+  }
+
+  if (success) {
+    c->tearing_hint = WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
+    fprintf(stderr, "tearing forced for: appid: '%s', title: '%s'\n", appid, title);
+  }
 }
 
 void
@@ -2085,6 +2121,8 @@ mapnotify(struct wl_listener *listener, void *data)
   Client *w, *c = wl_container_of(listener, c, map);
   Monitor *m;
   int i;
+
+  forcetearingrule(c);
 
   /* Create scene tree for this client and its border */
   c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
@@ -2331,6 +2369,13 @@ outputcantear(Monitor* m)
   return false;
 }
 
+int
+moncantear(Monitor* m)
+{
+  Client *c = focustop(m);
+  return (c && c->isfullscreen && c->tearing_hint); /* 1 == ASYNC */
+}
+
 void
 outputmgrapply(struct wl_listener *listener, void *data)
 {
@@ -2471,10 +2516,7 @@ quit(const Arg *arg)
 void
 rendermon(struct wl_listener *listener, void *data)
 {
-  /* This function is called every time an output is ready to display a frame,
-   * generally at the output's refresh rate (e.g. 60Hz). */
   Monitor *m = wl_container_of(listener, m, frame);
-  Client *c;
   struct wlr_scene_output *scene_output = m->scene_output;
   struct wlr_output *wlr_output = m->wlr_output;
   struct wlr_gamma_control_v1 *gamma_control = NULL;
@@ -2510,12 +2552,11 @@ rendermon(struct wl_listener *listener, void *data)
     }
   }
 
-  if (outputcantear(m)) {
+  if (tearing_allowed && outputcantear(m)) {
     pending.tearing_page_flip = true;
 
     if (!wlr_output_test_state(m->wlr_output, &pending)) {
       fprintf(stderr, "Output test failed on '%s', retrying without tearing page-flip\n", m->wlr_output->name);
-
       pending.tearing_page_flip = false;
     }
   }
@@ -2526,7 +2567,6 @@ rendermon(struct wl_listener *listener, void *data)
   wlr_output_state_finish(&pending);
 
  skip:
-  /* Send frame done to all visible surfaces */
   clock_gettime(CLOCK_MONOTONIC, &frame_done_data.when);
   frame_done_data.mon = m;
   wlr_scene_output_for_each_buffer(m->scene_output, sendframedoneiterator, &frame_done_data);
